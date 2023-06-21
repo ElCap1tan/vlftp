@@ -51,6 +51,13 @@ ssize_t write_n(int fd, const void *buf, size_t n) {
     return (total_written == 0 && currently_written < 0) ? currently_written : (ssize_t) total_written;
 }
 
+void check_write(ssize_t written, size_t to_write) {
+    if (written != to_write) {
+        perror("Failed to write");
+        exit(EXIT_FAILURE);
+    }
+}
+
 struct sockaddr_in* resolve_hostname(char *hostname) {
     struct addrinfo hints;
     struct addrinfo *res;
@@ -88,13 +95,6 @@ void validate_cmd(int argc, char *argv[]) {
     }
 }
 
-void check_write(ssize_t written, size_t to_write) {
-    if (written != to_write) {
-        perror("Failed to write");
-        exit(EXIT_FAILURE);
-    }
-}
-
 int main(int argc, char *argv[]) {
     char *hostname;
     char *cmd;
@@ -102,6 +102,7 @@ int main(int argc, char *argv[]) {
     int sock_fd, errcode, to_send;
     uint32_t nbytes, nbytes_nl;
     ssize_t written;
+    uint16_t success;
 
     if (argc == 1) {
         print_usage(argv);
@@ -134,7 +135,7 @@ int main(int argc, char *argv[]) {
 
     // Write number of arguments to transfer
     uint32_t to_send_nl = htonl(to_send);
-    written = write(sock_fd, &to_send_nl, sizeof(to_send_nl));
+    written = write_n(sock_fd, &to_send_nl, sizeof(to_send_nl));
     check_write(written, sizeof(to_send_nl));
 
     // Transfer arguments
@@ -143,21 +144,41 @@ int main(int argc, char *argv[]) {
         nbytes_nl = htonl(nbytes);
 
         // Write length of arg
-        written = write(sock_fd, &nbytes_nl, sizeof(nbytes_nl));
+        written = write_n(sock_fd, &nbytes_nl, sizeof(nbytes_nl));
         check_write(written, sizeof(nbytes_nl));
 
         // Write argument
-        written = write(sock_fd, argv[i], nbytes);
+        written = write_n(sock_fd, argv[i], nbytes);
         check_write(written, nbytes);
     }
 
-    read(sock_fd, &nbytes_nl, sizeof(nbytes_nl));
+    if (strcmp(argv[2], "get") == 0 || strcmp(argv[2], "put") == 0) {
+        read_n(sock_fd, &success, sizeof(success));
+    }
+
+    read_n(sock_fd, &nbytes_nl, sizeof(nbytes_nl));
     // printf("To rcv: %zu bytes\n", nbytes);
     nbytes = ntohl(nbytes_nl);
     char buff[nbytes];
-    read(sock_fd, buff, sizeof(buff));
+    read_n(sock_fd, buff, sizeof(buff));
     // printf("Buff:\n%s", buff);
-    puts(buff);
+
+    if (strcmp(argv[2], "get") == 0) {
+        if (success) {
+            FILE *f;
+
+            if (argc >= 5) f = fopen(argv[4], "w");
+            else f = fopen(argv[3], "w");
+
+            fprintf(f, "%s", buff);
+
+            fclose(f);
+        } else {
+            puts(buff);
+        }
+    } else {
+        puts(buff);
+    }
 
     close(sock_fd);
 

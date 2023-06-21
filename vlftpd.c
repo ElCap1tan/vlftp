@@ -51,6 +51,13 @@ ssize_t write_n(int fd, const void *buf, size_t n) {
     return (total_written == 0 && currently_written < 0) ? currently_written : (ssize_t) total_written;
 }
 
+void check_write(ssize_t written, size_t to_write) {
+    if (written != to_write) {
+        perror("Failed to write");
+        exit(EXIT_FAILURE);
+    }
+}
+
 char *get_local_time_str() {
     time_t raw_time;
     struct tm * time_info;
@@ -71,7 +78,7 @@ void vlftpd_shutdown(int signum) {
     exit(EXIT_SUCCESS);
 }
 
-char *read_to_end(FILE *stream) {
+char *read_to_null_term(FILE *stream) {
     char *output = NULL;
     size_t buff_size = 0;
     char *error_txt = "vlftpd: Error reading command output\n";
@@ -88,60 +95,114 @@ char *read_to_end(FILE *stream) {
     return output;
 }
 
+char *read_file(FILE *f) {
+    char *string;
+
+    fseek(f, 0, SEEK_END);
+    long f_size = ftell(f);
+    rewind(f);
+
+    string = malloc(f_size + 1);
+    fread(string, f_size, 1, f);
+    fclose(f);
+
+    string[f_size] = 0;
+
+    return string;
+}
+
+char *strerror_format(int err_num, char* format_str) {
+    char *errno_str = strerror(err_num);
+    char *buff = malloc((strlen(format_str) + strlen(errno_str) + 1) * sizeof(char));
+    sprintf(buff, format_str, errno_str);
+
+    return buff;
+}
+
 void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
     FILE *pipe;
     char *srv_cmd = args[0];
     uint32_t msg_len;
-    char *ans = NULL;
+    char *res = NULL;
+    ssize_t written;
+    int free_res = 0;
     // char *err_txt = "vlftpd: Unknown command\n";
     // char *ret;
 
     if (strcmp("pwd", srv_cmd) == 0) {
-        ans = malloc((PATH_MAX + 1) * sizeof(char));
-        if (!getcwd(ans, PATH_MAX + 1)) {
+        res = malloc((PATH_MAX + 1) * sizeof(char));
+        free_res = 1;
+        if (!getcwd(res, PATH_MAX + 1)) {
             perror("vlftpd: getcwd()");
-            strcpy(ans, "vlftpd: Error getting current working directory");
+            res = strerror_format(errno, "vlftpd: Error getting current working directory: %s");
         }
     } else if (strcmp("dir", srv_cmd) == 0) {
-        ans = "ls -a";
+        res = "ls -a";
         if (arg_count > 1) {
-            if (strcmp("directory", args[1]) == 0) { ans = "ls -a -d */"; }
-            else if (strcmp("files", args[1]) == 0) { ans = "ls -a -p | grep -v /"; }
+            if (strcmp("directory", args[1]) == 0) { res = "ls -a -d */"; }
+            else if (strcmp("files", args[1]) == 0) { res = "ls -a -p | grep -v /"; }
         }
-        pipe = popen(ans, "r");
-        ans = read_to_end(pipe);
-        pclose(pipe);
+        if ((pipe = popen(res, "r"))) {
+            res = read_to_null_term(pipe);
+            pclose(pipe);
+        } else {
+            perror("vlftpd: popen()");
+            res = strerror_format(errno, "vlftpd: Error running the required command: %s");
+        }
+
+        free_res = 1;
     } else if (strcmp("cd", srv_cmd) == 0) {
         if (arg_count > 1) {
             if (chdir(args[1]) == 0) {
-                ans = "vlftpd: SUCCESS!";
+                res = "vlftpd: SUCCESS!";
             } else {
-                ans = "vlftpd: Error changing the current directory.";
+                res = strerror_format(errno, "vlftpd: Error changing the current directory.");
+                free_res = 1;
             }
         } else {
-            ans = "vlftpd: Error changing the current directory. Missing argument!";
+            res = "vlftpd: Error changing the current directory. Missing argument!";
         }
     } else if (strcmp("get", srv_cmd) == 0) {
-        // TODO: Handle get cmd
+        uint16_t success;
+
+        if (arg_count > 1) {
+            FILE *file = fopen(args[1], "r");
+            if (file) {
+                res = read_file(file);
+                success = htons(1);
+                written = write_n(client_fd, &success, sizeof(success));
+                check_write(written, sizeof(success));
+            } else {
+                perror("vlftpd: fopen()");
+                res = strerror_format(errno, "vlftpd: Error reading the file: %s");
+                success = htons(0);
+                written = write_n(client_fd, &success, sizeof(success));
+                check_write(written, sizeof(success));
+            }
+
+            free_res = 1;
+        }
     } else if (strcmp("put", srv_cmd) == 0) {
         // TODO: Handle put cmd
     } else {
-        ans = "vlftpd: Unknown command.";
+        res = "vlftpd: Unknown command.";
     }
 
-    msg_len = strlen(ans) + 1;
+    msg_len = strlen(res) + 1;
     printf("MSG_LEN: %d\n", msg_len);
     msg_len = htonl(msg_len);
 
     // Write msg len
-    write(client_fd, &msg_len, sizeof(msg_len));
+    written = write_n(client_fd, &msg_len, sizeof(msg_len));
+    check_write(written, sizeof(msg_len));
 
     // Write msg
-    write(client_fd, ans, strlen(ans) + 1);
-    puts(ans);
+    written = write_n(client_fd, res, strlen(res) + 1);
+    check_write(written, strlen(res) + 1);
+    puts(res);
 
-    if (strcmp("pwd", srv_cmd) == 0 || strcmp("dir", srv_cmd) == 0) {
-        free(ans);
+    if (free_res) {
+        free(res);
     }
 }
 
@@ -232,18 +293,18 @@ int main() {
         printf("Connected to client '%s'...\n", client_ip);
 
         // Read argument count
-        read(client_fd, &arg_count, sizeof(arg_count));
+        read_n(client_fd, &arg_count, sizeof(arg_count));
         arg_count = ntohl(arg_count);
 
         char *args[arg_count];
 
         // Read arguments
         for (int i = 0; i < arg_count; i++) {
-            read(client_fd, &msg_len, sizeof(msg_len));
+            read_n(client_fd, &msg_len, sizeof(msg_len));
             msg_len = ntohl(msg_len);
 
             args[i] = malloc(msg_len * sizeof(char));
-            read(client_fd, args[i], msg_len);
+            read_n(client_fd, args[i], msg_len);
         }
         printf("Received command '%s'...\n", args[0]);
         for (int i = 1; i < arg_count; i++) {
