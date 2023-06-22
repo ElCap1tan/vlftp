@@ -75,7 +75,12 @@ struct sockaddr_in* resolve_hostname(char *hostname) {
     return (struct sockaddr_in *) res->ai_addr;
 }
 
-void validate_cmd(int argc, char *argv[]) {
+void validate_args(int argc, char *argv[]) {
+    if (argc == 1) {
+        print_usage(argv);
+        exit(EXIT_SUCCESS);
+    }
+
     if (argc < 3) {
         fprintf(stderr,
                 "You need to supply at least 2 arguments but you provided %d.\n", argc-1);
@@ -96,31 +101,57 @@ void validate_cmd(int argc, char *argv[]) {
     }
 }
 
+char *read_file(FILE *f, long *f_size) {
+    char *string;
+
+    fseek(f, 0, SEEK_END);
+    *f_size = ftell(f);
+    // printf("Filesize: %ld\n", *f_size);
+    rewind(f);
+
+    string = malloc(*f_size + 1);
+    fread(string, *f_size, 1, f);
+
+    string[*f_size] = 0;
+
+    return string;
+}
+
 int main(int argc, char *argv[]) {
     char *hostname;
     char *cmd;
+    char *buf;
+    long *file_length;
     struct sockaddr_in *server_addr;
     int sock_fd, errcode, to_send;
-    uint32_t nbytes, nbytes_nl;
+    uint32_t msg_len, msg_len_nl;
     ssize_t written;
     uint16_t success;
 
-    if (argc == 1) {
-        print_usage(argv);
-        return EXIT_SUCCESS;
-    }
-
-    validate_cmd(argc, argv);
+    validate_args(argc, argv);
 
     to_send = argc - 2;
     if (to_send > MAX_ARGS + 1) { to_send = MAX_ARGS + 1; }
 
     hostname = argv[1];
+    cmd = argv[2];
 
     server_addr = resolve_hostname(hostname);
     server_addr->sin_port = htons(SERVER_PORT);
 
     // printf("IP: %s, Port: %d, Fam: %hu\n", inet_ntoa(server_addr->sin_addr), ntohs(server_addr->sin_port), server_addr->sin_family);
+
+    if (strcmp(cmd, "put") == 0) {
+        FILE *file = fopen(argv[3], "r");
+        if (file) {
+            file_length = malloc(sizeof(long));
+            buf = read_file(file, file_length);
+            fclose(file);
+        } else {
+            perror("The file requested can't be transferred");
+            return EXIT_FAILURE;
+        }
+    }
 
     sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd < 0) {
@@ -141,30 +172,41 @@ int main(int argc, char *argv[]) {
 
     // Transfer arguments
     for (int i = 2; i < to_send + 2; i++) {
-        nbytes = strlen(argv[i]) + 1;
-        nbytes_nl = htonl(nbytes);
+        msg_len = strlen(argv[i]) + 1;
+        msg_len_nl = htonl(msg_len);
 
         // Write length of arg
-        written = write_n(sock_fd, &nbytes_nl, sizeof(nbytes_nl));
-        check_write(written, sizeof(nbytes_nl));
+        written = write_n(sock_fd, &msg_len_nl, sizeof(msg_len_nl));
+        check_write(written, sizeof(msg_len_nl));
 
         // Write argument
-        written = write_n(sock_fd, argv[i], nbytes);
-        check_write(written, nbytes);
+        written = write_n(sock_fd, argv[i], msg_len);
+        check_write(written, msg_len);
     }
 
-    if (strcmp(argv[2], "get") == 0 || strcmp(argv[2], "put") == 0) {
+    if (strcmp(cmd, "put") == 0) {
+        msg_len = *file_length;
+        free(file_length);
+
+        msg_len_nl = htonl(msg_len);
+        written = write_n(sock_fd, &msg_len_nl, sizeof(msg_len_nl));
+        check_write(written, sizeof(msg_len_nl));
+
+        written = write_n(sock_fd, buf, msg_len);
+        check_write(written, msg_len);
+        free(buf);
+    } else if (strcmp(cmd, "get") == 0) {
         read_n(sock_fd, &success, sizeof(success));
     }
 
-    read_n(sock_fd, &nbytes_nl, sizeof(nbytes_nl));
-    // printf("To rcv: %zu bytes\n", nbytes);
-    nbytes = ntohl(nbytes_nl);
-    char buff[nbytes];
-    read_n(sock_fd, buff, sizeof(buff));
-    // printf("Buff:\n%s", buff);
+    read_n(sock_fd, &msg_len_nl, sizeof(msg_len_nl));
+    // printf("To rcv: %zu bytes\n", msg_len);
+    msg_len = ntohl(msg_len_nl);
+    buf = malloc(msg_len * sizeof(char));
+    read_n(sock_fd, buf, msg_len);
+    // printf("Buf:\n%s", buf);
 
-    if (strcmp(argv[2], "get") == 0) {
+    if (strcmp(cmd, "get") == 0) {
         if (success) {
             int fd;
 
@@ -175,16 +217,17 @@ int main(int argc, char *argv[]) {
                 exit(-1);
             }
 
-            write(fd, buff, nbytes);
+            write_n(fd, buf, msg_len);
 
             close(fd);
         } else {
-            puts(buff);
+            puts(buf);
         }
     } else {
-        puts(buff);
+        puts(buf);
     }
 
+    free(buf);
     close(sock_fd);
 
     return EXIT_SUCCESS;

@@ -8,6 +8,7 @@
 #include <signal.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 
 #define SERVER_PORT 8080
 #define DAEMON_WORKING_DIR "/tmp"
@@ -80,10 +81,10 @@ void vlftpd_shutdown(int signum) {
 
 char *read_to_null_term(FILE *stream) {
     char *output = NULL;
-    size_t buff_size = 0;
+    size_t buf_size = 0;
     char *error_txt = "vlftpd: Error reading command output\n";
 
-    if (getdelim(&output, &buff_size, '\0', stream) == -1) {
+    if (getdelim(&output, &buf_size, '\0', stream) == -1) {
         free(output);
         perror(error_txt);
         output = malloc((strlen(error_txt) + 1) * sizeof(char));
@@ -100,7 +101,7 @@ char *read_file(FILE *f, long *f_size) {
 
     fseek(f, 0, SEEK_END);
     *f_size = ftell(f);
-    printf("Filesize: %ld\n", *f_size);
+    // printf("Filesize: %ld\n", *f_size);
     rewind(f);
 
     string = malloc(*f_size + 1);
@@ -113,55 +114,53 @@ char *read_file(FILE *f, long *f_size) {
 
 char *strerror_format(int err_num, char* format_str) {
     char *errno_str = strerror(err_num);
-    char *buff = malloc((strlen(format_str) + strlen(errno_str) + 1) * sizeof(char));
-    sprintf(buff, format_str, errno_str);
+    char *buf = malloc((strlen(format_str) + strlen(errno_str) + 1) * sizeof(char));
+    sprintf(buf, format_str, errno_str);
 
-    return buff;
+    return buf;
 }
 
 void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
     FILE *pipe;
     char *srv_cmd = args[0];
-    uint32_t msg_len, msg_len_net;
-    char *res = NULL;
+    uint32_t msg_len, msg_len_nl;
+    char *buf = NULL;
     ssize_t written;
-    int free_res = 0;
+    int free_buf = 0;
     long *file_length = NULL;
-    // char *err_txt = "vlftpd: Unknown command\n";
-    // char *ret;
 
     if (strcmp("pwd", srv_cmd) == 0) {
-        res = malloc((PATH_MAX + 1) * sizeof(char));
-        free_res = 1;
-        if (!getcwd(res, PATH_MAX + 1)) {
+        buf = malloc((PATH_MAX + 1) * sizeof(char));
+        free_buf = 1;
+        if (!getcwd(buf, PATH_MAX + 1)) {
             perror("vlftpd: getcwd()");
-            res = strerror_format(errno, "vlftpd: Error getting current working directory: %s");
+            buf = strerror_format(errno, "vlftpd: Error getting current working directory: %s");
         }
     } else if (strcmp("dir", srv_cmd) == 0) {
-        res = "ls -a";
+        buf = "ls -a";
         if (arg_count > 1) {
-            if (strcmp("directory", args[1]) == 0) { res = "ls -a -d */"; }
-            else if (strcmp("files", args[1]) == 0) { res = "ls -a -p | grep -v /"; }
+            if (strcmp("directory", args[1]) == 0) { buf = "ls -a -d */"; }
+            else if (strcmp("files", args[1]) == 0) { buf = "ls -a -p | grep -v /"; }
         }
-        if ((pipe = popen(res, "r"))) {
-            res = read_to_null_term(pipe);
+        if ((pipe = popen(buf, "r"))) {
+            buf = read_to_null_term(pipe);
             pclose(pipe);
         } else {
             perror("vlftpd: popen()");
-            res = strerror_format(errno, "vlftpd: Error running the required command: %s");
+            buf = strerror_format(errno, "vlftpd: Error running the required command: %s");
         }
 
-        free_res = 1;
+        free_buf = 1;
     } else if (strcmp("cd", srv_cmd) == 0) {
         if (arg_count > 1) {
             if (chdir(args[1]) == 0) {
-                res = "vlftpd: SUCCESS!";
+                buf = "vlftpd: SUCCESS!";
             } else {
-                res = strerror_format(errno, "vlftpd: Error changing the current directory.");
-                free_res = 1;
+                buf = strerror_format(errno, "vlftpd: Error changing the current directory.");
+                free_buf = 1;
             }
         } else {
-            res = "vlftpd: Error changing the current directory. Missing argument!";
+            buf = "vlftpd: Error changing the current directory. Missing argument!";
         }
     } else if (strcmp("get", srv_cmd) == 0) {
         uint16_t success;
@@ -170,58 +169,99 @@ void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
             FILE *file = fopen(args[1], "r");
             if (file) {
                 file_length = malloc(sizeof(long));
-                res = read_file(file, file_length);
+                buf = read_file(file, file_length);
                 fclose(file);
                 success = htons(1);
                 written = write_n(client_fd, &success, sizeof(success));
                 check_write(written, sizeof(success));
             } else {
                 perror("vlftpd: fopen()");
-                res = strerror_format(errno, "vlftpd: Error reading the file: %s");
+                buf = strerror_format(errno, "vlftpd: Error reading the file: %s");
                 success = htons(0);
                 written = write_n(client_fd, &success, sizeof(success));
                 check_write(written, sizeof(success));
             }
 
-            free_res = 1;
-        }
+            free_buf = 1;
+        } // TODO: Send error msg
     } else if (strcmp("put", srv_cmd) == 0) {
-        // TODO: Handle put cmd
+        read_n(client_fd, &msg_len_nl, sizeof(msg_len_nl));
+        msg_len = ntohl(msg_len_nl);
+        printf("DATA_LEN: %d\n", msg_len);
+
+        buf = malloc(msg_len * sizeof(char));
+        if (!buf) {
+            perror("malloc buff");
+        }
+        read_n(client_fd, buf, msg_len);
+        printf("DATA: \n%s\n", buf);
+
+        int fd;
+        if (arg_count > 2) {
+            fd = open(args[2] ,O_WRONLY | O_CREAT, 0644);
+        } else if (arg_count > 1) {
+            fd = open(args[1] ,O_WRONLY | O_CREAT, 0664);
+        } else {
+            // TODO: Send error msg
+            return;
+        }
+
+        if (fd == -1) {
+            free(buf);
+            buf = strerror_format(errno, "vlftpd: Error opening file: %s");
+            perror("vlftpd: Error Opening file");
+
+            free_buf = 1;
+        } else {
+            written = write_n(fd, buf, msg_len);
+            free(buf);
+
+            if (written != msg_len) {
+                buf = strerror_format(errno, "vlftpd: Error writing file: %s");
+                perror("vlftpd: Error writing to file");
+
+                free_buf = 1;
+            } else {
+                buf = "vlftpd: SUCCESS!";
+            }
+
+            close(fd);
+        }
     } else {
-        res = "vlftpd: Unknown command.";
+        buf = "vlftpd: Unknown command.";
     }
 
     if (file_length) {
         msg_len = *file_length;
         free(file_length);
     } else {
-        msg_len = strlen(res) + 1;
+        msg_len = strlen(buf) + 1;
     }
     printf("MSG_LEN: %d\n", msg_len);
-    msg_len_net = htonl(msg_len);
+    msg_len_nl = htonl(msg_len);
 
     // Write msg len
-    written = write_n(client_fd, &msg_len_net, sizeof(msg_len_net));
-    check_write(written, sizeof(msg_len_net));
+    written = write_n(client_fd, &msg_len_nl, sizeof(msg_len_nl));
+    check_write(written, sizeof(msg_len_nl));
 
     // Write msg
-    written = write_n(client_fd, res, msg_len);
+    written = write_n(client_fd, buf, msg_len);
     printf("Written: %zd\n", written);
     check_write(written, msg_len);
-    puts(res);
+    puts(buf);
 
-    if (free_res) {
-        free(res);
+    if (free_buf) {
+        free(buf);
     }
 }
 
-void client_fd_to_ip_str(int client_fd, char *buff) {
+void client_fd_to_ip_str(int client_fd, char *buf) {
     struct sockaddr_in addr;
     socklen_t addr_size = sizeof(struct sockaddr_in);
     if (getpeername(client_fd, (struct sockaddr *)&addr, &addr_size) != 0) {
-        strcpy(buff, "[UNKNOWN]");
+        strcpy(buf, "[UNKNOWN]");
     } else {
-        strcpy(buff, inet_ntoa(addr.sin_addr));
+        strcpy(buf, inet_ntoa(addr.sin_addr));
     }
 }
 
@@ -328,17 +368,6 @@ int main() {
 
         close(client_fd);
         printf("Connection to client '%s' closed.\n", client_ip);
-
-        /*
-        puts(output);
-
-        length = strlen(output) + 1;
-        write(client_fd, &length, sizeof(length));
-        write(client_fd, output, length);
-
-        free(output);
-        close(client_fd);
-        */
     }
 
     return EXIT_SUCCESS;
