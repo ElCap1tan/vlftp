@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 
 #define SERVER_PORT 8080
 #define MAX_ARGS 2
@@ -165,14 +166,18 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(argv[2], "get") == 0) {
         if (success) {
-            FILE *f;
+            int fd;
 
-            if (argc >= 5) f = fopen(argv[4], "w");
-            else f = fopen(argv[3], "w");
+            if (argc >= 5) fd = open(argv[4] ,O_WRONLY | O_CREAT, 0644);
+            else fd = open(argv[3] ,O_WRONLY | O_CREAT, 0664);
+            if (fd == -1) {
+                perror("open()");
+                exit(-1);
+            }
 
-            fprintf(f, "%s", buff);
+            write(fd, buff, nbytes);
 
-            fclose(f);
+            close(fd);
         } else {
             puts(buff);
         }

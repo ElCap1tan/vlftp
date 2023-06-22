@@ -36,7 +36,7 @@ ssize_t write_n(int fd, const void *buf, size_t n) {
     size_t	total_written = 0;
     ssize_t	currently_written = 0;
 
-    const uint8_t *b = (const uint8_t *) (buf);
+    const uint8_t *b = (const uint8_t *) buf;
 
     while (total_written < n) {
         if ((currently_written = write(fd, b + total_written, n - total_written)) < 0 && errno != EINTR)
@@ -95,18 +95,18 @@ char *read_to_null_term(FILE *stream) {
     return output;
 }
 
-char *read_file(FILE *f) {
+char *read_file(FILE *f, long *f_size) {
     char *string;
 
     fseek(f, 0, SEEK_END);
-    long f_size = ftell(f);
+    *f_size = ftell(f);
+    printf("Filesize: %ld\n", *f_size);
     rewind(f);
 
-    string = malloc(f_size + 1);
-    fread(string, f_size, 1, f);
-    fclose(f);
+    string = malloc(*f_size + 1);
+    fread(string, *f_size, 1, f);
 
-    string[f_size] = 0;
+    string[*f_size] = 0;
 
     return string;
 }
@@ -122,10 +122,11 @@ char *strerror_format(int err_num, char* format_str) {
 void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
     FILE *pipe;
     char *srv_cmd = args[0];
-    uint32_t msg_len;
+    uint32_t msg_len, msg_len_net;
     char *res = NULL;
     ssize_t written;
     int free_res = 0;
+    long *file_length = NULL;
     // char *err_txt = "vlftpd: Unknown command\n";
     // char *ret;
 
@@ -168,7 +169,9 @@ void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
         if (arg_count > 1) {
             FILE *file = fopen(args[1], "r");
             if (file) {
-                res = read_file(file);
+                file_length = malloc(sizeof(long));
+                res = read_file(file, file_length);
+                fclose(file);
                 success = htons(1);
                 written = write_n(client_fd, &success, sizeof(success));
                 check_write(written, sizeof(success));
@@ -188,17 +191,23 @@ void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
         res = "vlftpd: Unknown command.";
     }
 
-    msg_len = strlen(res) + 1;
+    if (file_length) {
+        msg_len = *file_length;
+        free(file_length);
+    } else {
+        msg_len = strlen(res) + 1;
+    }
     printf("MSG_LEN: %d\n", msg_len);
-    msg_len = htonl(msg_len);
+    msg_len_net = htonl(msg_len);
 
     // Write msg len
-    written = write_n(client_fd, &msg_len, sizeof(msg_len));
-    check_write(written, sizeof(msg_len));
+    written = write_n(client_fd, &msg_len_net, sizeof(msg_len_net));
+    check_write(written, sizeof(msg_len_net));
 
     // Write msg
-    written = write_n(client_fd, res, strlen(res) + 1);
-    check_write(written, strlen(res) + 1);
+    written = write_n(client_fd, res, msg_len);
+    printf("Written: %zd\n", written);
+    check_write(written, msg_len);
     puts(res);
 
     if (free_res) {
