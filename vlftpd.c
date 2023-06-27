@@ -14,6 +14,7 @@
 #define DAEMON_WORKING_DIR "/tmp"
 #define LOG_FILE_NAME "vlftpd.log"
 
+// Wrapper around the read() method to handle partial reads. Reads exactly n bytes if possible.
 ssize_t read_n(int fd, void *buf, size_t n) {
     size_t	total_read = 0;
     ssize_t	currently_read = 0;
@@ -33,6 +34,7 @@ ssize_t read_n(int fd, void *buf, size_t n) {
     return (total_read == 0 && currently_read < 0) ? currently_read : (ssize_t) total_read;
 }
 
+// Wrapper around the write() method to handle partial writes. Writes exactly n bytes if possible.
 ssize_t write_n(int fd, const void *buf, size_t n) {
     size_t	total_written = 0;
     ssize_t	currently_written = 0;
@@ -59,6 +61,7 @@ void check_write(ssize_t written, size_t to_write) {
     }
 }
 
+// Returns current local time as string
 char *get_local_time_str() {
     time_t raw_time;
     struct tm * time_info;
@@ -79,6 +82,7 @@ void vlftpd_shutdown(int signum) {
     exit(EXIT_SUCCESS);
 }
 
+// Reads from stream until a null terminator is encountered and returns the result as string.
 char *read_to_null_term(FILE *stream) {
     char *output = NULL;
     size_t buf_size = 0;
@@ -96,6 +100,7 @@ char *read_to_null_term(FILE *stream) {
     return output;
 }
 
+// Reads a file from disk and saves the amount of bytes read in the long pointed to by f_size.
 char *read_file(FILE *f, long *f_size) {
     char *string;
 
@@ -112,6 +117,7 @@ char *read_file(FILE *f, long *f_size) {
     return string;
 }
 
+// Appends a human-readable description of err_num to format_str and returns the result.
 char *strerror_format(int err_num, char* format_str) {
     char *errno_str = strerror(err_num);
     char *buf = malloc((strlen(format_str) + strlen(errno_str) + 1) * sizeof(char));
@@ -161,6 +167,7 @@ void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
             }
         } else {
             buf = "vlftpd: Error changing the current directory. Missing argument!";
+            puts(buf);
         }
     } else if (strcmp("get", srv_cmd) == 0) {
         uint16_t success;
@@ -183,7 +190,13 @@ void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
             }
 
             free_buf = 1;
-        } // TODO: Send error msg
+        } else {
+            success = htons(0);
+            written = write_n(client_fd, &success, sizeof(success));
+            check_write(written, sizeof(success));
+            buf = "vlftpd: Error getting file from server. Missing argument!";
+            puts(buf);
+        }
     } else if (strcmp("put", srv_cmd) == 0) {
         read_n(client_fd, &msg_len_nl, sizeof(msg_len_nl));
         msg_len = ntohl(msg_len_nl);
@@ -196,24 +209,24 @@ void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
         read_n(client_fd, buf, msg_len);
         printf("DATA: \n%s\n", buf);
 
-        int fd;
+        int out_file_fd;
         if (arg_count > 2) {
-            fd = open(args[2] ,O_WRONLY | O_CREAT, 0644);
+            out_file_fd = open(args[2], O_WRONLY | O_CREAT, 0644);
         } else if (arg_count > 1) {
-            fd = open(args[1] ,O_WRONLY | O_CREAT, 0664);
+            out_file_fd = open(args[1], O_WRONLY | O_CREAT, 0664);
         } else {
-            // TODO: Send error msg
+            // Error message should be sent here but technically this execution path should never be reached.
             return;
         }
 
-        if (fd == -1) {
+        if (out_file_fd == -1) {
             free(buf);
             buf = strerror_format(errno, "vlftpd: Error opening file: %s");
             perror("vlftpd: Error Opening file");
 
             free_buf = 1;
         } else {
-            written = write_n(fd, buf, msg_len);
+            written = write_n(out_file_fd, buf, msg_len);
             free(buf);
 
             if (written != msg_len) {
@@ -225,7 +238,7 @@ void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
                 buf = "vlftpd: SUCCESS!";
             }
 
-            close(fd);
+            close(out_file_fd);
         }
     } else {
         buf = "vlftpd: Unknown command.";
@@ -255,6 +268,7 @@ void handle_cmd(int client_fd, char *args[], uint32_t arg_count) {
     }
 }
 
+// Tries to get the corresponding IP of client_fd as a string representation and copies it in buf.
 void client_fd_to_ip_str(int client_fd, char *buf) {
     struct sockaddr_in addr;
     socklen_t addr_size = sizeof(struct sockaddr_in);
@@ -314,9 +328,12 @@ int main() {
         return EXIT_FAILURE;
     }
 
+    // Close stdin stream and redirect stdout and stderr streams to the log file.
     close(STDIN_FILENO);
     freopen(LOG_FILE_NAME, "a+", stdout);
     freopen(LOG_FILE_NAME, "a+", stderr);
+
+    // Makes stdout and stderr steams to be line buffered to avoid having to flush the streams after every print.
     setvbuf(stdout, NULL, _IOLBF, sysconf(_SC_PAGESIZE));
     setvbuf(stderr, NULL, _IOLBF, sysconf(_SC_PAGESIZE));
 

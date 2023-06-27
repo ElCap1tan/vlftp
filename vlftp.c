@@ -8,12 +8,13 @@
 #include <fcntl.h>
 
 #define SERVER_PORT 8080
-#define MAX_ARGS 2
+#define MAX_ARGS 2 // Maximal number of arguments that are needed for any given command and thus send to the server.
 
 void print_usage(char *argv[]) {
     printf("Usage: '%s server command [argument1 [argument2]]'\n", argv[0]);
 }
 
+// Wrapper around the read() method to handle partial reads. Reads exactly n bytes if possible.
 ssize_t read_n(int fd, void *buf, size_t n) {
     size_t	total_read = 0;
     ssize_t	currently_read = 0;
@@ -33,6 +34,7 @@ ssize_t read_n(int fd, void *buf, size_t n) {
     return (total_read == 0 && currently_read < 0) ? currently_read : (ssize_t) total_read;
 }
 
+// Wrapper around the write() method to handle partial writes. Writes exactly n bytes if possible.
 ssize_t write_n(int fd, const void *buf, size_t n) {
     size_t	total_written = 0;
     ssize_t	currently_written = 0;
@@ -59,6 +61,7 @@ void check_write(ssize_t written, size_t to_write) {
     }
 }
 
+// Resolves a hostname string to the corresponding IP address.
 struct sockaddr_in* resolve_hostname(char *hostname) {
     struct addrinfo hints;
     struct addrinfo *res;
@@ -75,6 +78,9 @@ struct sockaddr_in* resolve_hostname(char *hostname) {
     return (struct sockaddr_in *) res->ai_addr;
 }
 
+// Very liberally check arguments for validity to stop the client from sending commands that can't possibly be
+// fulfilled to the server. Only checks the number of provided arguments. If not enough arguments for the given command
+// are provided, exit with failure. Further error handling and reporting is left to the server.
 void validate_args(int argc, char *argv[]) {
     if (argc == 1) {
         print_usage(argv);
@@ -101,6 +107,7 @@ void validate_args(int argc, char *argv[]) {
     }
 }
 
+// Reads a file from disk and saves the amount of bytes read in the long pointed to by f_size.
 char *read_file(FILE *f, long *f_size) {
     char *string;
 
@@ -126,7 +133,7 @@ int main(int argc, char *argv[]) {
     int sock_fd, errcode, to_send;
     uint32_t msg_len, msg_len_nl;
     ssize_t written;
-    uint16_t success;
+    uint16_t success; // Used as bool for 'get' command. 1 if the file transfer was successful and 0 otherwise.
 
     validate_args(argc, argv);
 
@@ -207,7 +214,7 @@ int main(int argc, char *argv[]) {
     // printf("Buf:\n%s", buf);
 
     if (strcmp(cmd, "get") == 0) {
-        if (success) {
+        if (success) { // If file transfer was successful save returned data to file...
             int fd;
 
             if (argc >= 5) fd = open(argv[4] ,O_WRONLY | O_CREAT, 0644);
@@ -220,7 +227,7 @@ int main(int argc, char *argv[]) {
             write_n(fd, buf, msg_len);
 
             close(fd);
-        } else {
+        } else { // Otherwise an error message was send back, and we simply print it to the terminal.
             puts(buf);
         }
     } else {
